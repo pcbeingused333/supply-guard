@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# supply-guard shim: check with guard.py, then exec the real tool.
+# Bypass for one command: GUARD_OFF=1 <command>
+name=$(basename "$0")
+dir=$(cd "$(dirname "$0")" && pwd -P)
+real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | while read -r p; do [ "$(cd "$p" 2>/dev/null && pwd -P)" != "$dir" ] && printf '%s:' "$p"; done) command -v "$name")
+if [ -z "$real" ]; then echo "supply-guard: real '$name' not found in PATH" >&2; exit 127; fi
+if [ -z "$GUARD_OFF" ]; then
+  python3 -I "$dir/../guard.py" pre "$name" "$@"
+  rc=$?
+  if [ "$rc" -eq 66 ]; then exit 66; fi
+  if [ "$rc" -ne 0 ]; then echo "[supply-guard] guard exited $rc; NOT verified, continuing" >&2; fi
+fi
+exec "$real" "$@"
