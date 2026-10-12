@@ -22,8 +22,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,12 +54,14 @@ def warn(msg: str) -> None:
 # --------------------------------------------------------------------- OSV
 
 def _post(url: str, body: dict) -> dict:
+    import urllib.request  # lazy: ~40 ms of imports the cached path doesn't need
     req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=20) as r:
         return json.load(r)
 
 
 def _get(url: str) -> dict:
+    import urllib.request
     with urllib.request.urlopen(url, timeout=20) as r:
         return json.load(r)
 
@@ -125,6 +125,7 @@ def find_up(names: list[str], start: Path | None = None) -> Path | None:
 
 
 def parse_uv_lock(path: Path) -> list[Pkg]:
+    import tomllib
     data = tomllib.loads(path.read_text())
     out = []
     for p in data.get("package", []):
@@ -164,6 +165,22 @@ def parse_gemfile_lock(path: Path) -> list[Pkg]:
             ver = m.group(2).split("-")[0] if re.search(r"-(x86|arm|aarch|java|universal)", m.group(2)) else m.group(2)
             out.append(Pkg("RubyGems", m.group(1), ver))
     return out
+
+
+LOCK_KEYS: list[str] = []  # stat keys of lockfiles read for this command
+
+
+def lock_pkgs(path: Path | None) -> list[Pkg]:
+    """Parse a lockfile unless this exact file (path, mtime, size) was already
+    checked clean recently: `uv run` hits this on every invocation."""
+    if not path:
+        return []
+    st = path.stat()
+    key = f"lock:{path.resolve()}:{st.st_mtime_ns}:{st.st_size}"
+    if key in _cache_load():
+        return []
+    LOCK_KEYS.append(key)
+    return parse_lock(path)
 
 
 def parse_lock(path: Path) -> list[Pkg]:
@@ -380,7 +397,7 @@ def plan(tool: str, args: list[str]) -> tuple[list[Pkg], list[Pkg] | None, str]:
                     elif a.startswith("--with="):
                         reqs += a.split("=", 1)[1].split(",")
                 lock = find_up(["uv.lock"])
-                locked = parse_uv_lock(lock) if lock else []
+                locked = lock_pkgs(lock)
                 if not reqs and not locked:
                     return [], [], ""
                 return py_pkgs(reqs) + locked, (resolve_py(reqs) if reqs else []), "uv run"
@@ -392,7 +409,7 @@ def plan(tool: str, args: list[str]) -> tuple[list[Pkg], list[Pkg] | None, str]:
             return py_pkgs(reqs), resolve_py(reqs) if reqs else [], f"uv {sub}"
         if sub in ("sync", "lock"):
             lock = find_up(["uv.lock"])
-            return (parse_uv_lock(lock) if lock else []), [], f"uv {sub} ({lock or 'no uv.lock'})"
+            return (lock_pkgs(lock)), [], f"uv {sub} ({lock or 'no uv.lock'})"
         return [], [], ""
 
     if tool == "uvx":
@@ -412,10 +429,10 @@ def plan(tool: str, args: list[str]) -> tuple[list[Pkg], list[Pkg] | None, str]:
             if pkgs:
                 return pkgs, resolve_npm([s for s in specs if npm_pkg(s)]), "npm install"
             lock = find_up(["npm-shrinkwrap.json", "package-lock.json"])
-            return (parse_package_lock(lock) if lock else []), [], f"npm {sub} ({lock or 'no lockfile'})"
+            return (lock_pkgs(lock)), [], f"npm {sub} ({lock or 'no lockfile'})"
         if sub in ("ci", "clean-install", "install-clean", "ic"):
             lock = find_up(["npm-shrinkwrap.json", "package-lock.json"])
-            return (parse_package_lock(lock) if lock else []), [], f"npm ci ({lock or 'no lockfile'})"
+            return (lock_pkgs(lock)), [], f"npm ci ({lock or 'no lockfile'})"
         if sub in ("exec", "x"):
             return plan("npx", rest)
         return [], [], ""
@@ -448,7 +465,7 @@ def plan(tool: str, args: list[str]) -> tuple[list[Pkg], list[Pkg] | None, str]:
 
     if tool == "bundle" and sub in ("", "install", "update"):
         lock = find_up(["Gemfile.lock"])
-        return (parse_gemfile_lock(lock) if lock else []), [], f"bundle {sub or 'install'} ({lock or 'no Gemfile.lock'})"
+        return (lock_pkgs(lock)), [], f"bundle {sub or 'install'} ({lock or 'no Gemfile.lock'})"
 
     return [], [], ""
 
@@ -509,6 +526,8 @@ def check(pkgs: list[Pkg], direct: list[Pkg], what: str) -> int:
     key = _cache_key(pkgs)
     if key in _cache_load():
         say(f"{what}: {len(set(pkgs))} packages, clean (cached)")
+        for k in LOCK_KEYS:
+            _cache_store(k)
         return 0
     t0 = time.monotonic()
     hits = dedupe(osv_malicious(pkgs))
@@ -517,6 +536,8 @@ def check(pkgs: list[Pkg], direct: list[Pkg], what: str) -> int:
     if not hits:
         say(f"{what}: {len(set(pkgs))} packages, no malicious advisories ({ms} ms)")
         _cache_store(key)
+        for k in LOCK_KEYS:
+            _cache_store(k)
         return 0
     report(hits, set(direct))
     if os.environ.get("GUARD_FORCE") == "1":

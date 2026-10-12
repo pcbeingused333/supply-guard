@@ -1,14 +1,27 @@
 #!/usr/bin/env bash
 # supply-guard shim: check with guard.py, then exec the real tool.
+# Only install-like commands pay for the check; everything else execs at once.
 # Bypass for one command: GUARD_OFF=1 <command>
-name=$(basename "$0")
-dir=$(cd "$(dirname "$0")" && pwd -P)
-real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | while read -r p; do [ "$(cd "$p" 2>/dev/null && pwd -P)" != "$dir" ] && printf '%s:' "$p"; done) command -v "$name")
-if [ -z "$real" ]; then echo "supply-guard: real '$name' not found in PATH" >&2; exit 127; fi
+name=${0##*/}
+dir=${0%/*}
+p=":$PATH:"; p=${p//:$dir:/:}; p=${p//:$HOME\/tools\/supply-guard\/shims:/:}; p=${p#:}; p=${p%:}
+real=$(PATH=$p command -v "$name")
+[ -n "$real" ] || { echo "supply-guard: real '$name' not found in PATH" >&2; exit 127; }
+check=
 if [ -z "$GUARD_OFF" ]; then
+  case "$name:${1-}" in
+    pip:install|pip3:install|uv:pip|uv:add|uv:sync|uv:lock|uv:tool|uvx:*|npx:*|gem:install) check=1 ;;
+    uv:run) for a in "$@"; do case $a in --with|--with=*) check=1;; --no-sync|--) break;; esac; done
+            case " $* " in *" --no-sync "*) [ -z "$check" ] && check=0;; esac
+            [ -z "$check" ] && [ -z "${UV_NO_SYNC-}" ] && check=1; [ "$check" = 0 ] && check= ;;
+    npm:install|npm:i|npm:add|npm:in|npm:ci|npm:ic|npm:clean-install|npm:install-clean|npm:it|npm:install-test|npm:update|npm:up|npm:upgrade|npm:exec|npm:x) check=1 ;;
+    bundle:|bundle:install|bundle:update) check=1 ;;
+  esac
+fi
+if [ -n "$check" ]; then
   python3 -I "$dir/../guard.py" pre "$name" "$@"
   rc=$?
-  if [ "$rc" -eq 66 ]; then exit 66; fi
-  if [ "$rc" -ne 0 ]; then echo "[supply-guard] guard exited $rc; NOT verified, continuing" >&2; fi
+  [ "$rc" -eq 66 ] && exit 66
+  [ "$rc" -ne 0 ] && echo "[supply-guard] guard exited $rc; NOT verified, continuing" >&2
 fi
 exec "$real" "$@"

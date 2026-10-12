@@ -318,7 +318,9 @@ def toast(title: str, body: str) -> None:
     )
     try:
         subprocess.Popen(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
+            # conhost --headless: no console window flashes up (plain powershell.exe opens one)
+            ["/mnt/c/WINDOWS/System32/conhost.exe", "--headless", "powershell.exe",
+             "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
             env=dict(os.environ, SG_T=title, SG_B=body[:250], WSLENV="SG_T:SG_B"),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
